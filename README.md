@@ -9,7 +9,7 @@ claude plugin marketplace add Pigravenllc/pigraven-marketplace
 claude plugin install steerline@steerline
 ```
 
-Then give the plugin your Steerline's address (`/plugin`, Steerline, configure) and pair this machine: open the Pair a machine page on your Steerline, press Get a code, and run `/steerline:pair <code>` in Claude Code. The code works once, for 10 minutes; restart Claude Code afterwards. `/steerline:pair --forget` removes the pairing. A token from the team page, entered in the same configure screen, works too: it is kept in your system's secure credential store. The plugin sends a token only over https or to your own machine.
+The plugin talks to the hosted Steerline at https://steerline.pigraven.com unless you give it another address (`/plugin`, Steerline, configure). Pair this machine: open the Pair a machine page on your Steerline (https://steerline.pigraven.com/pair), press Get a code, and run `/steerline:pair <code>` in Claude Code. The code works once, for 10 minutes; restart Claude Code afterwards. `/steerline:pair --forget` removes the pairing. A token from the team page, entered in the same configure screen, works too: it is kept in your system's secure credential store. The plugin sends a token only over https or to your own machine.
 
 ## Enroll a repository
 

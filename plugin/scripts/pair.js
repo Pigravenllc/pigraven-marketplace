@@ -19,7 +19,7 @@ const { spawnSync } = require('child_process');
 
 const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
 const pairedFile = path.join(home, '.steerline', 'paired.json');
-const DEFAULT_URL = 'http://localhost:5311';
+const DEFAULT_URL = 'https://steerline.pigraven.com';
 const TIMEOUT_MS = 15000;
 const CODE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9-]{3,31}$/; // a code is eight letters and digits, shown with a hyphen; nothing a shell could split or expand, and never an option (--help)
 // A name the platform sent, as a few plain words: it is printed where the model reads it.

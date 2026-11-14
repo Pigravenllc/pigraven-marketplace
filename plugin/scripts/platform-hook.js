@@ -36,7 +36,7 @@
 // As the Steerline plugin (decision #477, 2026-10-18; CLAUDE_PLUGIN_ROOT is set): the platform's address and token are the plugin's options
 // (CLAUDE_PLUGIN_OPTION_URL, CLAUDE_PLUGIN_OPTION_TOKEN; the token sits in the OS's secure store), the MCP tools are
 // mcp__plugin_steerline_platform__*, and with no platform.json the project is resolved by the platform from the repository's git remote
-// and the folder inside it (#482), cached per session; a folder that resolves to nothing gets one line naming steerline enroll and nothing
+// and the folder inside it (#482), cached per session; a folder that resolves to nothing gets one line naming the Repositories page and nothing
 // else (#494); register_session with a project id sets it explicitly (/steerline:project, #495). The spool lives under ~/.steerline (#487).
 'use strict';
 // 2026-10-19.1: the question-tool redirect also asks for the standing rule each option becomes (rules, #9).
@@ -116,7 +116,7 @@ const userConfigPath = path.join(home, '.claude', 'platform.json');
 const pluginMode = !!process.env.CLAUDE_PLUGIN_ROOT;
 const spoolDir = pluginMode ? path.join(home, '.steerline', 'spool') : path.join(home, '.claude', 'platform-spool');
 const sessionCacheDir = path.join(process.env.CLAUDE_PLUGIN_DATA || path.join(home, '.steerline', 'cache'), 'sessions');
-const DEFAULT_URL = 'http://localhost:5311';
+const DEFAULT_URL = 'https://steerline.pigraven.com';
 const TIMEOUT_MS = 8000;
 // How long guidance-wait waits on an answer, and the news waiter for news; the hook's timeout in the settings is a little longer (WAIT_HOURS * 3600 + 300 seconds).
 const WAIT_HOURS = 24;
@@ -363,14 +363,14 @@ const pairAgainLine = (address) => 'Steerline refused this machine\'s paired tok
 function lineFor(kind, status, owner) {
   if (kind === 'lapsed') return 'Steerline: your company\'s plan has lapsed; ask ' + (owner || 'your Steerline owner') + ' to renew. This session works without it.';
   if (kind === 'refused' && status !== 403 && pairedToken) return pairAgainLine(pairedAddress);
-  if (kind === 'refused') return status === 403 ? 'Steerline says you may not use this company (403). Ask an admin. This session works without it.' : 'Steerline refused your token (401). Run steerline login. This session works without it.';
+  if (kind === 'refused') return status === 403 ? 'Steerline says you may not use this company (403). Ask an admin. This session works without it.' : 'Steerline refused your token (401). Replace or clear the token in /plugin, Steerline, configure. This session works without it.';
   if (kind === 'slow') return 'Steerline asked this machine to slow down (429). Nothing is lost; the next call goes through.';
   return 'Steerline is unreachable; this session works without it.';
 }
 // No token, no call: as the plugin with no token the hooks make no network request, unless the address was set on purpose and is this machine
 // (local development). The runner's job token is the plugin's token default, so it counts as a token.
 const noNetwork = pluginMode && !token && !(isLoopback(baseUrl()) && !!(process.env.CLAUDE_PLUGIN_OPTION_URL || process.env.PLATFORM_URL));
-const NO_TOKEN_LINE = 'Steerline: this repository uses Steerline but you have no token yet. Run steerline login (or /plugin, Steerline, configure) to connect, or pair this machine with /steerline:pair <code> (a code from the Pair a machine page on your Steerline); this session works without it.';
+const NO_TOKEN_LINE = 'Steerline: this repository uses Steerline but you have no token yet. Pair this machine with /steerline:pair <code> (a code from the Pair a machine page on your Steerline); this session works without it.';
 
 // The health cache, per machine: {url, tk, state: 'ok'|'down'|'lapsed'|'refused', status, owner, at}. A healthy platform costs one read at most.
 const DOWN_MS = 60 * 1000, LAPSED_MS = 10 * 60 * 1000;
@@ -1016,8 +1016,8 @@ async function main() {
       const why = c.why || 'it resolves to no project';
       if (c.quiet) return; // the repository's settings do not name Steerline: the plugin is on for another reason, and says nothing here
       if (c.unreachable && c.kind && c.kind !== 'down') { if (toldOnce(sid, c.kind)) process.stdout.write(lineFor(c.kind, c.status, c.owner)); return; }
-      if (c.unreachable) { process.stdout.write('Steerline: ' + why + ', so this session is not on the record; it works without it. steerline doctor explains.'); return; }
-      process.stdout.write('Steerline: this folder is not attached to a project (' + why + '). Run steerline enroll to attach it, or /steerline:project <id> for this session; steerline doctor explains.');
+      if (c.unreachable) { process.stdout.write('Steerline: ' + why + ', so this session is not on the record; it works without it. Check the address in /plugin, Steerline, configure.'); return; }
+      process.stdout.write('Steerline: this folder is not attached to a project (' + why + '). Attach this repository on the Repositories page (' + baseUrl() + '/enroll) or run /steerline:project <id> for this session.');
     }
     return;
   }

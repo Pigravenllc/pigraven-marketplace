@@ -5,7 +5,7 @@
       "url": "${user_config.url}/mcp",
       "headers": {
         "Authorization": "Bearer ${user_config.token}",
-        "X-Steerline-Plugin": "0.2.21"
+        "X-Steerline-Plugin": "0.2.22"
       },
       "headersHelper": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pair.js\" headers"
     }
