@@ -1,0 +1,24 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "steerline",
+  "displayName": "Steerline",
+  "version": "0.2.16",
+  "description": "Connects every Claude Code session in an enrolled repository to your team's Steerline: a brief at start, intents and outcomes recorded, questions to the person who owns the decision, decisions in scope.",
+  "author": { "name": "Pigraven LLC" },
+  "license": "MIT",
+  "keywords": ["coordination", "agents", "decisions"],
+  "userConfig": {
+    "url": {
+      "type": "string",
+      "title": "Steerline address",
+      "description": "Your company's Steerline, for example https://app.steerline.example (steerline login shows it)",
+      "default": "http://localhost:5311"
+    },
+    "token": {
+      "type": "string",
+      "title": "Your Steerline token",
+      "description": "A token from the team page on Steerline; kept in your system's secure credential store",
+      "sensitive": true
+    }
+  }
+}

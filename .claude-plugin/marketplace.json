@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "steerline",
+  "description": "Steerline's Claude Code plugin: the hooks and the MCP server that connect a team's sessions to its Steerline.",
+  "owner": { "name": "Pigraven LLC" },
+  "plugins": [
+    {
+      "name": "steerline",
+      "source": "./plugin",
+      "description": "Connects every Claude Code session in an enrolled repository to your team's Steerline.",
+      "category": "productivity"
+    }
+  ]
+}

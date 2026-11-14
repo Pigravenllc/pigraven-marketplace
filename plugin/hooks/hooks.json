@@ -1,0 +1,31 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "matcher": "startup|clear|compact", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "session-start"], "timeout": 20, "statusMessage": "Reading the project brief from Steerline" } ] },
+      { "matcher": "resume|fork", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "session-resume"], "timeout": 20, "statusMessage": "Checking Steerline for news" } ] }
+    ],
+    "SubagentStart": [
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "subagent-start"], "timeout": 20, "statusMessage": "Reading the brief for the subagent" } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "prompt"], "timeout": 10 } ] }
+    ],
+    "PreToolUse": [
+      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "ask-guidance"], "timeout": 20, "statusMessage": "Filing the question as a guidance request" } ] },
+      { "matcher": "mcp__(plugin_steerline_)?platform__.*", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "inject-session"], "timeout": 15 } ] }
+    ],
+    "PostToolUse": [
+      { "matcher": "mcp__(plugin_steerline_)?platform__ask_guidance", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "guidance-wait"], "timeout": 86700, "asyncRewake": true } ] }
+    ],
+    "PostToolBatch": [
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "batch"], "timeout": 86700, "asyncRewake": true } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "stop"], "timeout": 20, "statusMessage": "Checking the outcome was recorded" } ] },
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "tests"], "timeout": 900, "statusMessage": "Running the repository tests" } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "session-end"], "timeout": 15 } ] }
+    ]
+  }
+}
