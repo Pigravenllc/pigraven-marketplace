@@ -14,6 +14,9 @@
       { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "ask-guidance"], "timeout": 20, "statusMessage": "Filing the question as a guidance request" } ] },
       { "matcher": "mcp__(plugin_steerline_)?platform__.*", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "inject-session"], "timeout": 15 } ] }
     ],
+    "PostToolUseFailure": [
+      { "matcher": "mcp__(plugin_steerline_)?platform__.*", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "tool-failed"], "timeout": 10 } ] }
+    ],
     "PostToolUse": [
       { "matcher": "mcp__(plugin_steerline_)?platform__ask_guidance", "hooks": [ { "type": "command", "command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/platform-hook.js", "guidance-wait"], "timeout": 86700, "asyncRewake": true } ] }
     ],

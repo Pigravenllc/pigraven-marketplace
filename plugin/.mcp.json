@@ -4,8 +4,10 @@
       "type": "http",
       "url": "${user_config.url}/mcp",
       "headers": {
-        "Authorization": "Bearer ${user_config.token}"
-      }
+        "Authorization": "Bearer ${user_config.token}",
+        "X-Steerline-Plugin": "0.2.20"
+      },
+      "headersHelper": "node \"${CLAUDE_PLUGIN_ROOT}/scripts/pair.js\" headers"
     }
   }
 }
