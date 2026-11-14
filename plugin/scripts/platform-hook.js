@@ -16,13 +16,15 @@
 //   batch           (asyncRewake, PostToolBatch) once per batch of tool calls: note the files edited and read, send them with the heartbeat, at most once a
 //                   minute (decision #791; since decision #3226 it asks for no news); when no waiter is alive for the session, hold one long
 //                   poll for a signal addressed to it (its branch's merge request verdict), and wake the session when one lands (decisions #1157, #3226);
-//                   a SendMessage to another session is told at once, with the sender's one-line summary and never the message (agent-platform #45)
+//                   a SendMessage to another session is told at once, with the sender's one-line summary (or the fixed words "(no summary)") and never any of the message (agent-platform #45)
 //   heartbeat       (async) the heartbeat alone, from the PostToolUse hook of an older hooks.json
 //   stop            refuse to end until an outcome is recorded; when the platform is unreachable, spool the outcome instead
-//   tests           (Stop) run the repository's STEERLINE_TEST_COMMAND when the tree changed since its last green run (decision #1104);
-//                   it needs no platform project and runs wherever the command is set
+//   tests           (Stop) run the repository's STEERLINE_TEST_COMMAND when the tree changed since its last green run (decision #1104), but only a command
+//                   the user approved for this repository with trust-tests (plugin 0.2.21: a repository's settings are not the user's word; an unapproved
+//                   or changed command is not run, does not block, and is announced once a day); it needs no platform project
 //   session-end     (SessionEnd) tell the platform the session ended, so its open intent closes (decision #791)
 //   replay          (manual) send the spooled outcomes now;   version  (manual) print this script's version
+//   trust-tests     (manual, run in a repository) approve its STEERLINE_TEST_COMMAND for the tests hook: --command "<cmd>" names it, --forget withdraws the approval
 // The project is the one of the folder the session started in (CLAUDE_PROJECT_DIR): the nearest platform.json walking up, else the
 // user-level map in ~/.claude/platform.json, else PLATFORM_PROJECT in the environment. Outside a platform project every event is a no-op.
 // Claude Code loads a repository's hooks only when the session starts at its root; when the repository's copy of this script is
@@ -62,9 +64,14 @@
 // 2026-11-03.1 (plugin 0.2.14): guidance-wait wakes its session when the question was withdrawn (agent-platform #40), and /steerline:project can set the project
 //   again, so a name the platform refused is corrected by running the command once more (agent-platform #46).
 // 2026-11-03.2 (plugin 0.2.15, agent-platform #45): work passed between sessions. The batch hook reports a SendMessage to another session (to, and the sender's
-//   summary, else the message's first 80 characters; never the message), and the prompt hook reports a prompt wrapped as <cross-session-message>
+//   summary, else the message's first 80 characters; never the message; 0.2.21 sends "(no summary)" instead of those 80 characters), and the prompt hook reports a prompt wrapped as <cross-session-message>
 //   (the sender's name; never its text).
-const VERSION = '2026-11-14.1';
+const VERSION = '2026-11-14.2';
+// 2026-11-14.2 (plugin 0.2.21, fixes from an external review): (1) a token is never sent over plain http to another machine: the hooks already held it back (headersFor), and now
+//   pair.js headers answers an http address that is not this machine with a refusing Authorization that overrides .mcp.json's static one, and session start says so in plain words.
+//   (2) the tests hook runs STEERLINE_TEST_COMMAND only when the user approved that exact command for that repository root (~/.steerline/trusted-tests.json, made by the
+//   trust-tests command); an unapproved or changed command is not run, does not block the stop, and is announced once a day. (3) the spool, its markers and ~/.steerline are
+//   owner-only (0700 folders, 0600 files; on Windows the folder's inherited rights are removed once). (4) a handoff with no summary sends "(no summary)", not the start of the message.
 // 2026-11-14.1 (plugin 0.2.20, agent-platform issue 86 part 3 and issue 91 part 2): (1) the session's last message is sent only when the platform says this company
 //   keeps it: before session-end sends it, and before a spooled outcome that holds it is replayed, the hook asks GET /api/data/last-message ({capture: true|false}),
 //   at most one request, cached per address and token for 5 minutes (a 404 from an older platform counts as an answer; any other failure is kept for 1 minute), and on any doubt (failure, timeout, an older platform, a body
@@ -127,7 +134,14 @@ function bare(tool) { const m = /^mcp__(?:plugin_steerline_)?platform__(.+)$/.ex
 
 function readJson(p) { try { return JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { return null; } }
 // Makes the folder and writes the JSON; an error is swallowed (a hook never fails over its own bookkeeping).
-function writeJson(file, value) { try { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, JSON.stringify(value)); } catch (e) { /* ignore */ } }
+// Every folder this hook makes under ~/.steerline goes through mkdirp, which first makes ~/.steerline itself owner-only (once per process, secureHome), so the
+// spool, caches, stamps, test state and the trusted-tests file all sit under a private root and inherit its rights. Writes outside it (CLAUDE_PLUGIN_DATA) are left as they were.
+const steerlineRoot = path.join(home, '.steerline');
+const ownerOnlyDone = new Set();
+function underSteerline(p) { const r = path.relative(steerlineRoot, path.resolve(p)); return r === '' || (!r.startsWith('..') && !path.isAbsolute(r)); }
+function secureHome() { ownerOnlyDir(steerlineRoot); }
+function mkdirp(dir) { if (underSteerline(dir)) secureHome(); fs.mkdirSync(dir, { recursive: true }); }
+function writeJson(file, value) { try { mkdirp(path.dirname(file)); fs.writeFileSync(file, JSON.stringify(value)); } catch (e) { /* ignore */ } }
 function norm(p) { return path.resolve(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(); }
 const copy = norm(__filename).includes('/.claude/hooks/') ? 'repo' : 'user';
 function log(parts) { if (!logFile) return; try { fs.appendFileSync(logFile, [copy].concat(parts).join(' ') + '\n'); } catch (e) { /* ignore */ } }
@@ -208,7 +222,7 @@ function gitBranch(dir) {
 function sidFile(sid) { return String(sid).replace(/[^A-Za-z0-9_-]/g, '_'); }
 function cacheFile(sid) { return path.join(sessionCacheDir, sidFile(sid) + '.json'); }
 function readCache(sid) { return readJson(cacheFile(sid)); }
-function writeCache(sid, entry) { try { fs.mkdirSync(sessionCacheDir, { recursive: true }); fs.writeFileSync(cacheFile(sid), JSON.stringify(entry)); } catch (e) { /* ignore */ } }
+function writeCache(sid, entry) { try { mkdirp(sessionCacheDir); fs.writeFileSync(cacheFile(sid), JSON.stringify(entry)); } catch (e) { /* ignore */ } }
 async function resolveByRemote(startDir, sid) {
   const url = baseUrl();
   const cached = readCache(sid);
@@ -443,7 +457,7 @@ function noTokenLineDue() {
     const age = Date.now() - Date.parse(fs.readFileSync(NO_TOKEN_STAMP, 'utf8').trim());
     if (age >= 0 && age < 24 * 60 * 60 * 1000) return false; // a stamp in the future (the clock moved back) has expired, as in knownTrouble
   } catch (e) { /* no stamp yet */ }
-  try { fs.mkdirSync(path.dirname(NO_TOKEN_STAMP), { recursive: true }); fs.writeFileSync(NO_TOKEN_STAMP, new Date().toISOString()); } catch (e) { /* ignore */ }
+  try { mkdirp(path.dirname(NO_TOKEN_STAMP)); fs.writeFileSync(NO_TOKEN_STAMP, new Date().toISOString()); } catch (e) { /* ignore */ }
   return true;
 }
 
@@ -531,7 +545,7 @@ function relPath(startDir, cwd, p) {
 // The files the session's batches edited and read (decision #791), per session, with whether each was sent: {edits: {rel: sent}, reads: {rel: sent}, sentAt}.
 const pathsFile = (sid) => path.join(sessionCacheDir, sidFile(sid) + '.paths.json');
 function readPaths(sid) { const p = readJson(pathsFile(sid)); return p && p.edits && p.reads ? p : { edits: {}, reads: {}, sentAt: 0 }; }
-function writePaths(sid, seen) { try { fs.mkdirSync(sessionCacheDir, { recursive: true }); fs.writeFileSync(pathsFile(sid), JSON.stringify(seen)); } catch (e) { /* ignore */ } }
+function writePaths(sid, seen) { try { mkdirp(sessionCacheDir); fs.writeFileSync(pathsFile(sid), JSON.stringify(seen)); } catch (e) { /* ignore */ } }
 // A path into a set: as itself while the set is small, else as its folder, which covers its files on the platform. True when new.
 function noteOne(set, rel) {
   if (rel in set) return false;
@@ -559,19 +573,19 @@ function noteBatch(seen, calls, startDir, cwd) {
 // adds content, recipient, recipient_kind and type to its copy), `to` is a session's name, optionally followed by " [ref]", or the address
 // of a session on this machine ("uds:..."), and the receiving session gets the message as its prompt, wrapped as
 // `Another Claude session sent a message:` and then <cross-session-message from="<sender's address>" name="<sender's name>" mode="prompting">.
-// Only the one line goes to the platform (the sender's summary, else the start of the message): never the message itself.
+// Only the one line goes to the platform (the sender's summary, else the fixed words below): no part of the message itself, ever.
 const AGENT_ID = /^a[0-9a-f]{8,}$/i;            // a raw agent id: an in-process subagent talking to its parent
 const SUMMARY_MAX = 120;                        // the platform cuts to the same
-const SUMMARY_FALLBACK_CHARS = 80;              // a message sent with no summary: its first 80 characters
+const NO_SUMMARY = '(no summary)';              // a message sent with no summary: these words, never a piece of the message (0.2.21)
 const CROSS_SESSION = /^\s*(?:[^<\n]{0,80}:[ \t]*\r?\n\s*)?<cross-session-message\b([^>]*)>/; // the wrapper at the start of a prompt, after at most the harness's own lead-in line (one line ending in a colon) and blank space
 const ADDRESS = /^uds:|\\\\\.\\pipe\\|:\/\//i;  // a session's address on this machine, which names no one
 function collapse(text) { return String(text == null ? '' : text).replace(/\s+/g, ' ').trim(); }
-// At most `max` characters, never ending on half an emoji; with `mark`, an ellipsis stands for what was cut (and counts in the max).
-function cut(text, max, mark) {
+// At most `max` characters, never ending on half an emoji; an ellipsis stands for what was cut (and counts in the max).
+function cut(text, max) {
   if (text.length <= max) return text;
-  let n = mark ? max - 1 : max;
+  let n = max - 1;
   if (/[\ud800-\udbff]/.test(text[n - 1] || '')) n--;
-  return text.slice(0, n).trimEnd() + (mark ? String.fromCharCode(0x2026) : '');
+  return text.slice(0, n).trimEnd() + String.fromCharCode(0x2026);
 }
 // Whether SendMessage's reply shows the message went to an in-process subagent: Claude Code answers such a send with the agent's id
 // (`resumedAgentId`, or `pin.id`, an "a" and hex). A reply that is missing or says neither is taken as a send to another session.
@@ -596,8 +610,8 @@ function handoffsIn(calls) {
     if (to === 'main' || to === '*' || AGENT_ID.test(to) || ti.recipient_kind === 'agent' || ti.recipient_kind === 'main') continue;
     // A named subagent is addressed by its name, not its id, but the reply says it was one: it resumed an agent, or pinned an agent id.
     if (toSubagent(t.tool_response)) continue;
-    const summary = cut(collapse(ti.summary), SUMMARY_MAX, true) || cut(message, SUMMARY_FALLBACK_CHARS, false);
-    found.push({ to: cut(to, SUMMARY_MAX, true), summary });
+    const summary = cut(collapse(ti.summary), SUMMARY_MAX) || NO_SUMMARY;
+    found.push({ to: cut(to, SUMMARY_MAX), summary });
   }
   return found;
 }
@@ -637,7 +651,7 @@ function wake(text) { process.stderr.write(capContext(text)); process.exitCode =
 async function waitForNews(sid, call, url) {
   const lock = newsWaitFile(sid);
   if (waiterAlive(lock)) return;
-  try { fs.mkdirSync(sessionCacheDir, { recursive: true }); fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() })); } catch (e) { return; }
+  try { mkdirp(sessionCacheDir); fs.writeFileSync(lock, JSON.stringify({ pid: process.pid, at: Date.now() })); } catch (e) { return; }
   const until = Date.now() + WAIT_HOURS * 3600 * 1000;
   let peeked = 0, failures = 0, answered = false;
   try {
@@ -672,11 +686,49 @@ async function waitForNews(sid, call, url) {
 // A marker file remembers a session that started while the platform was unreachable, so its end is spooled too.
 const spoolFile = (sid) => path.join(spoolDir, sidFile(sid) + '.json');
 const markerFile = (sid) => path.join(spoolDir, sidFile(sid) + '.unconnected');
+// A spooled file holds up to 4,000 characters of what the agent said last, so the spool is owner-only (external review, 2026-11-14, plugin 0.2.21): its folder is
+// made 0700 and chmod-ed even when it exists (and, as the plugin, so is ~/.steerline above it), and each file is made empty at 0600 before the text is in it.
+// On Windows the folder's inherited rights are removed and the current user is granted full control over it and what it will hold, once: a marker file in the folder
+// says it was tried, so icacls is not run on every hook call. Best effort, never throwing: a hook fails open.
+const OWNER_ONLY_MARK = '.owner-only';
+const SYSTEM32 = path.join(process.env.SystemRoot || 'C:/Windows', 'System32'); // named in full: a Git Bash folder earlier on the path has its own whoami
+// Keep in sync with pair.js (windowsAccount and its owner-only code): this is a copy, since the hook does not require another script.
+function windowsAccount() { // the account's SID as icacls names it (as pair.js does), else DOMAIN\USERNAME
+  try {
+    const r = spawnSync(path.join(SYSTEM32, 'whoami.exe'), ['/user', '/fo', 'csv', '/nh'], { windowsHide: true, encoding: 'utf8', timeout: 5000 });
+    const sid = r.status === 0 ? (String(r.stdout).match(/"(S-1-[\d-]+)"/) || [])[1] : null;
+    if (sid) return '*' + sid;
+  } catch (e) { /* fall back */ }
+  return process.env.USERDOMAIN && process.env.USERNAME ? process.env.USERDOMAIN + '\\' + process.env.USERNAME : null;
+}
+function ownerOnlyDir(dir) {
+  const key = path.resolve(dir);
+  if (ownerOnlyDone.has(key)) return; // once per folder per process: the folder, its mode and the marker are checked on the first write only
+  ownerOnlyDone.add(key);
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    try { fs.chmodSync(dir, 0o700); } catch (e) { /* a system without modes */ }
+    if (process.platform !== 'win32') return;
+    const mark = path.join(dir, OWNER_ONLY_MARK);
+    if (fs.existsSync(mark)) return;
+    const who = windowsAccount();
+    const r = who ? spawnSync(path.join(SYSTEM32, 'icacls.exe'), [dir, '/inheritance:r', '/grant:r', who + ':(OI)(CI)F'], { windowsHide: true, stdio: 'ignore', timeout: 10000 }) : null;
+    // The marker is written whether icacls worked or not, with the result in it: a home where icacls fails (a network share, say) would otherwise pay for whoami
+    // and icacls, with their timeouts, on every hook call. Delete the marker to try again.
+    fs.writeFileSync(mark, r && r.status === 0 ? 'ok' : 'failed');
+  } catch (e) { /* ignore */ }
+}
+function writeOwnerOnly(file, text, dirs) {
+  for (const d of dirs || (pluginMode ? [path.dirname(spoolDir), spoolDir] : [spoolDir])) ownerOnlyDir(d);
+  fs.writeFileSync(file, '', { mode: 0o600 });
+  try { fs.chmodSync(file, 0o600); } catch (e) { /* a system without modes */ }
+  fs.writeFileSync(file, text);
+}
 function spool(entry) {
-  try { fs.mkdirSync(spoolDir, { recursive: true }); fs.writeFileSync(spoolFile(entry.session), JSON.stringify(entry, null, 2)); } catch (e) { /* ignore */ }
+  try { writeOwnerOnly(spoolFile(entry.session), JSON.stringify(entry, null, 2)); } catch (e) { /* ignore */ }
 }
 function mark(sid, target, cwd) {
-  try { fs.mkdirSync(spoolDir, { recursive: true }); fs.writeFileSync(markerFile(sid), JSON.stringify({ project: target.project, url: target.url, cwd, at: new Date().toISOString() })); } catch (e) { /* ignore */ }
+  try { writeOwnerOnly(markerFile(sid), JSON.stringify({ project: target.project, url: target.url, cwd, at: new Date().toISOString() })); } catch (e) { /* ignore */ }
 }
 
 async function replay() {
@@ -705,7 +757,12 @@ async function replay() {
 }
 
 // The repository's own tests at the end of a turn (decision #1104): the command is STEERLINE_TEST_COMMAND, which a repository sets in the
-// env of its committed .claude/settings.json; without it this does nothing. It needs no platform. The tree's state (HEAD, status, the diff
+// env of its committed .claude/settings.json; without it this does nothing. A repository's settings are not the user's word, so since plugin 0.2.21
+// (external review, 2026-11-14) the command runs only when the user approved this exact command string for this repository (its worktrees share one approval): the approval is
+// a file in the user's home, ~/.steerline/trusted-tests.json, {"<main checkout's root, normalized>": {"command", "at"}}, made owner-only, written by
+// `node platform-hook.js trust-tests` run in the repository (`--forget` removes it, `--command "<cmd>"` names the command when the environment
+// does not). A command that is set but not approved, or changed since, does not run and does not block the stop: one notice, at most a day apart,
+// says what the repository asks to run and how to approve it. It needs no platform. The tree's state (HEAD, status, the diff
 // of tracked files, the contents of untracked ones) is fingerprinted, and the tests run only when it differs from the last green run; a
 // failure blocks the stop with the tail of the output, once per state, so a session that cannot fix them is not held in a loop. A clean
 // tree with no run on record whose HEAD is on a remote branch is taken as green (that branch's pipeline tested it), so a session that only
@@ -722,16 +779,78 @@ function treeState(root) {
   const added = untracked.split('\0').filter(Boolean).map(f => { try { return f + '\0' + sha256(fs.readFileSync(path.join(root, f))); } catch (e) { return f; } }).join('\0');
   return { clean: status.trim() === '', print: sha256(head + '\0' + status + '\0' + diff + '\0' + added) };
 }
+// The user's approvals of test commands, kept beside the paired token and as private: one entry per repository root.
+const trustedTestsFile = path.join(home, '.steerline', 'trusted-tests.json');
+function readTrusted() { const t = readJson(trustedTestsFile); return t && typeof t === 'object' && !Array.isArray(t) ? t : {}; }
+// An approval is for the repository, not one checkout of it: every worktree of a clone shares the key of its main checkout (the folder holding the common
+// .git), so a new worktree does not ask again; the command must still match exactly. A submodule or an older git keeps its own root.
+// One git call gives both the top level and the common dir (git 2.31 and later; --path-format first applies to both); an older git answers neither, and the
+// top level is then asked alone and the common dir stays unknown.
+function gitRoots(dir) {
+  const both = git(dir, ['rev-parse', '--path-format=absolute', '--show-toplevel', '--git-common-dir']).split('\n').map(l => l.trim());
+  if (both.length === 2 && both[0] && both[1]) return { root: both[0], common: both[1] };
+  return { root: git(dir, ['rev-parse', '--show-toplevel']), common: '' };
+}
+function trustKey(root, common) {
+  return norm(common && path.basename(common) === '.git' ? path.dirname(common) : root);
+}
+function testsTrusted(roots, command) { const e = readTrusted()[trustKey(roots.root, roots.common)]; return !!e && typeof e.command === 'string' && e.command === command; }
+function writeTrusted(all) { writeOwnerOnly(trustedTestsFile, JSON.stringify(all, null, 2), [path.dirname(trustedTestsFile)]); }
+const shown = (command) => collapse(command).slice(0, 300);
+// The one notice for a command that is set and not approved, shown to the person (a systemMessage), never blocking; the same repository and command are
+// not announced again for a day (a stamp beside the test states).
+function tellNotTrusted(root, command, stateDir) {
+  const stamp = path.join(stateDir, sha256(norm(root) + '\0' + command).slice(0, 16) + '.notice');
+  try { const age = Date.now() - fs.statSync(stamp).mtimeMs; if (age >= 0 && age < 24 * 60 * 60 * 1000) return; } catch (e) { /* not told yet */ }
+  try { mkdirp(stateDir); fs.writeFileSync(stamp, ''); } catch (e) { /* ignore */ }
+  out({ systemMessage: 'Steerline: this repository asks to run `' + shown(command) + '` (its STEERLINE_TEST_COMMAND) at each stop, and it has not been approved on this machine, so it was not run. ' +
+    'To approve exactly this command, run this yourself in your own terminal (an agent cannot approve it), in ' + root + ': node "' + __filename + '" trust-tests' });
+}
+// The manual command: approve (or, with --forget, withdraw the approval of) the current repository's test command. The command is --command, else the environment's,
+// else what the repository's own settings set (a person's shell does not have the variable Claude Code gives its hooks); it is printed, so the person sees what they approved.
+function readLine() {
+  const buf = Buffer.alloc(1); let line = '';
+  try { while (line.length < 1000 && fs.readSync(0, buf, 0, 1, null) === 1 && buf[0] !== 10) line += String.fromCharCode(buf[0]); } catch (e) { /* end of input */ }
+  return line;
+}
+function trustTests(args) {
+  const { root, common } = gitRoots(process.cwd());
+  if (!root) return 'Run this in the repository whose tests you are approving (it is not inside a git repository here).';
+  const all = readTrusted();
+  const key = trustKey(root, common);
+  if (args.includes('--forget')) {
+    if (!(key in all)) return 'No test command was approved for ' + root + '.';
+    delete all[key];
+    try { writeTrusted(all); } catch (e) { return 'The approval could not be removed (' + (e && e.code ? e.code : 'write failed') + ').'; }
+    return 'Forgot the approved test command for ' + root + '.';
+  }
+  // Approving needs a person at a terminal: Claude Code's Bash tool has no TTY, so an agent running this (say, told to by a repository's CLAUDE.md) is refused. The remaining
+  // limit: anything running as the user can write the trust file directly; the TTY gate stops the agent's shell tool path and a repository instructing the agent to approve itself.
+  const interactive = !!(process.stdin.isTTY && process.stdout.isTTY);
+  if (!interactive) { process.exitCode = 1; return 'Not approved: approving a test command needs a terminal you type in, and this is not one. Run it yourself in a terminal, in ' + root + ':\n  node "' + __filename + '" trust-tests\nAn agent cannot approve it.'; }
+  const at = args.indexOf('--command');
+  let command = at >= 0 ? String(args[at + 1] || '') : process.env.STEERLINE_TEST_COMMAND || '';
+  if (!command.trim() && at < 0) for (const f of ['settings.json', 'settings.local.json']) command = (((readJson(path.join(root, '.claude', f)) || {}).env || {}).STEERLINE_TEST_COMMAND || command);
+  command = String(command).trim();
+  if (!command) return 'No test command to approve: the repository sets no STEERLINE_TEST_COMMAND (or give one with --command "<command>").';
+  process.stdout.write('Repository: ' + root + '\nTest command: ' + shown(command) + '\nIt would run at each stop. Type yes to approve it: ');
+  if (readLine().trim().toLowerCase() !== 'yes') return 'Not approved; nothing was changed.';
+  all[key] = { command, at: new Date().toISOString() };
+  try { writeTrusted(all); } catch (e) { return 'The approval could not be saved (' + (e && e.code ? e.code : 'write failed') + ').'; }
+  return 'Approved for ' + root + ': ' + shown(command) + '\nIt runs at each stop when the tree changed. If the repository changes the command, approve it again; node "' + __filename + '" trust-tests --forget withdraws this.';
+}
 function runTests(startDir) {
   const command = (process.env.STEERLINE_TEST_COMMAND || '').trim();
   if (!command) return;
-  const root = git(startDir, ['rev-parse', '--show-toplevel']);
+  const roots = gitRoots(startDir), root = roots.root;
   if (!root) return;
+  const stateDir = path.join(process.env.CLAUDE_PLUGIN_DATA || path.join(home, '.steerline', 'cache'), 'tests');
+  if (!testsTrusted(roots, command)) { tellNotTrusted(root, command, stateDir); return; }
   const state = treeState(root);
   if (!state) return;
-  const stateFile = path.join(process.env.CLAUDE_PLUGIN_DATA || path.join(home, '.steerline', 'cache'), 'tests', sha256(norm(root)).slice(0, 16) + '.json');
+  const stateFile = path.join(stateDir, sha256(norm(root)).slice(0, 16) + '.json');
   const last = readJson(stateFile);
-  const save = (s) => { try { fs.mkdirSync(path.dirname(stateFile), { recursive: true }); fs.writeFileSync(stateFile, JSON.stringify(Object.assign({ root }, s))); } catch (e) { /* ignore */ } };
+  const save = (s) => { try { mkdirp(path.dirname(stateFile)); fs.writeFileSync(stateFile, JSON.stringify(Object.assign({ root }, s))); } catch (e) { /* ignore */ } };
   if (!last && state.clean && git(root, ['for-each-ref', '--contains', 'HEAD', '--count=1', 'refs/remotes'])) { save({ green: state.print }); return; }
   if (last && (last.green === state.print || last.failed === state.print)) return;
   const timeout = Math.min(Number(process.env.STEERLINE_TEST_TIMEOUT) || TEST_TIMEOUT_S, TEST_TIMEOUT_MAX_S) * 1000;
@@ -814,6 +933,7 @@ function toolFailed(sid, input, url) {
 
 async function main() {
   if (event === 'version') { process.stdout.write(VERSION + '\n'); return; }
+  if (event === 'trust-tests') { process.stdout.write(trustTests(process.argv.slice(3)) + '\n'); return; }
   if (event === 'replay') { const n = await replay(); process.stdout.write(n + ' spooled outcome(s) sent\n'); return; }
 
   let input = {};
@@ -825,6 +945,8 @@ async function main() {
   // issue 90: stood down by the platform, every event does nothing, except inject-session: it needs only local state (no platform call), and the
   // platform's own tools keep working if the model calls them. A stop is never held while stood down.
   // issue 91: with no token this makes no network call at all (callAt refuses too); the one line is for a repository that names Steerline, at most once a day.
+  // Plugin 0.2.21: a token for an address that is neither https nor this machine is never sent, by the hooks (headersFor) or by the MCP connection (pair.js headers); say so once at session start.
+  if (event === 'session-start' && pluginMode && token && !safeForToken(baseUrl())) process.stdout.write('Steerline: the address ' + baseUrl().replace(/\/\/[^/@]*@/, '//') + ' is plain http, not https and not this machine, so your token was not sent to it, by the hooks or by the MCP connection (which was given a refused header instead). Set an https address (/plugin, Steerline, configure).'+String.fromCharCode(10));
   if (noNetwork && event !== 'tests' && event !== 'inject-session') {
     if (event === 'session-start' && namesSteerline(startDir) && noTokenLineDue()) process.stdout.write(NO_TOKEN_LINE);
     return;
@@ -848,7 +970,7 @@ async function main() {
     const edits = unsent(seen.edits), reads = unsent(seen.reads);
     if (beatDue || (edits.length > 0 && Date.now() - (seen.sentAt || 0) >= EDIT_SEND_MS)) {
       // The beat is counted now, sent or not, so a platform that is down is not asked on every batch.
-      try { fs.mkdirSync(sessionCacheDir, { recursive: true }); fs.writeFileSync(beatFile, ''); } catch (e) { /* ignore */ }
+      try { mkdirp(sessionCacheDir); fs.writeFileSync(beatFile, ''); } catch (e) { /* ignore */ }
       beat = { seen, edits, reads };
     }
     // Nothing to send, and a waiter already holds this session's long poll (decision #1157): done, at the cost of one stat and one read.

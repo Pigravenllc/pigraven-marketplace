@@ -3,7 +3,8 @@
 //   node pair.js <code> [--url <address>]   trade the code from the platform's /pair page for a personal token and keep it on this machine
 //   node pair.js --forget [--url <address>] forget the token kept for the address
 //   node pair.js headers                    the plugin's MCP connection asks this for its headers (headersHelper in .mcp.json): prints
-//                                           {"Authorization":"Bearer <token>"} for the paired address, or {} when there is nothing to add
+//                                           {"Authorization":"Bearer <token>"} for the paired address, or {} when there is nothing to add; for an address that is
+//                                           not https or this machine, a refusing Authorization that overrides .mcp.json's, so no token goes over http
 // WHERE THE TOKEN LIVES: ~/.steerline/paired.json, one file per user, outside every repository, beside the spool the hook already keeps there.
 // It is {"<address>": {"token", "person", "company", "machine", "at"}}: the token is only ever read for the address it was paired with, and
 // only sent over https or to this machine. The file is made owner-only (mode 0600; on Windows the inherited rights are removed and the
@@ -130,14 +131,19 @@ function forget(url) {
   return { ok: true, text: 'Forgot the paired token for ' + key + ' on this machine. To end it on the platform too, revoke the machine at ' + key + '/pair. Restart Claude Code.' };
 }
 
-// What the MCP connection adds to its headers. Nothing when the plugin's own token default is set (a runner's job copy: the job's token must stay the job's),
+// A header the server will refuse, printed for an address that is neither https nor this machine. Claude Code lets a helper's header override the static
+// header of the same name, so this replaces .mcp.json's `Authorization: Bearer ${user_config.token}`: the typed token, which the helper cannot see, is never
+// sent over plain http (external review, 2026-11-14). It holds no part of any token.
+const INSECURE_HEADERS = { Authorization: 'Bearer refused-insecure-address' };
+// What the MCP connection adds to its headers. For an address that is not https (and not this machine) the refusing header above, decided before anything is read.
+// Otherwise nothing when the plugin's own token default is set (a runner's job copy: the job's token must stay the job's),
 // when no token was paired for this address, or when anything goes wrong: the static headers of .mcp.json then stand. The one trade-off: a token typed
 // into the plugin's option cannot be seen from here (a helper runs without credential variables), so a paired token wins on the MCP connection.
 function headers() {
+  const server = String(process.env.CLAUDE_CODE_MCP_SERVER_URL || '').replace(/\/mcp\/?$/, '');
+  if (!safeForToken(server)) return INSECURE_HEADERS; // also an empty or unreadable address: nothing is sent where it cannot be shown safe (safeForToken never throws)
   try {
     if (((pluginManifest().userConfig || {}).token || {}).default) return {};
-    const server = String(process.env.CLAUDE_CODE_MCP_SERVER_URL || '').replace(/\/mcp\/?$/, '');
-    if (!safeForToken(server)) return {};
     const e = readPaired(server);
     return e ? { Authorization: 'Bearer ' + e.token } : {};
   } catch (e) { return {}; }
