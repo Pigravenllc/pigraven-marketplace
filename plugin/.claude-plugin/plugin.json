@@ -2,7 +2,7 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "steerline",
   "displayName": "Steerline",
-  "version": "0.2.22",
+  "version": "0.2.23",
   "description": "Connects every Claude Code session in an enrolled repository to your team's Steerline: a brief at start, intents and outcomes recorded, questions to the person who owns the decision, decisions in scope.",
   "author": { "name": "Pigraven LLC" },
   "license": "MIT",

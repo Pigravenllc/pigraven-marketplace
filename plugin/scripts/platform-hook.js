@@ -66,7 +66,11 @@
 // 2026-11-03.2 (plugin 0.2.15, agent-platform #45): work passed between sessions. The batch hook reports a SendMessage to another session (to, and the sender's
 //   summary, else the message's first 80 characters; never the message; 0.2.21 sends "(no summary)" instead of those 80 characters), and the prompt hook reports a prompt wrapped as <cross-session-message>
 //   (the sender's name; never its text).
-const VERSION = '2026-11-14.2';
+const VERSION = '2026-11-14.3';
+// 2026-11-14.3 (agent-platform decision #3596, the free plan's caps): a registration the platform refuses with 403 {"error":"free_plan_limit","message":...} (a free company
+//   already has its most sessions running) is classified 'capped'. The session works without Steerline: the server's one line is shown once, the session is
+//   remembered as capped in a flag file (<sid>.capped, this session only, never the machine's health cache), and every later event of it makes no call. A question
+//   is then sent to the chat (or stops an unattended session) as for any unusable platform, and the question tool is not turned away.
 // 2026-11-14.2 (plugin 0.2.21, fixes from an external review): (1) a token is never sent over plain http to another machine: the hooks already held it back (headersFor), and now
 //   pair.js headers answers an http address that is not this machine with a refusing Authorization that overrides .mcp.json's static one, and session start says so in plain words.
 //   (2) the tests hook runs STEERLINE_TEST_COMMAND only when the user approved that exact command for that repository root (~/.steerline/trusted-tests.json, made by the
@@ -349,10 +353,29 @@ function classify(e) {
   const s = e && e.status ? e.status : 0;
   if (s === 0 || s >= 500 || s === 408) return 'down';
   if (s === 402) return 'lapsed';
+  if (s === 403 && limitBody(e)) return 'capped';
   if (s === 401 || s === 403) return 'refused';
   if (s === 429) return 'slow';
   return 'other';
 }
+// The body of a free-plan refusal ({error:'free_plan_limit', message}), else null; parsed once per failure (classify reads it, limitLine reuses it).
+function limitBody(e) {
+  if (!e || typeof e !== 'object') return null;
+  if (e.limitBody === undefined) {
+    try { const o = JSON.parse(e.body || '{}'); e.limitBody = o && o.error === 'free_plan_limit' ? o : null; } catch (x) { e.limitBody = null; }
+  }
+  return e.limitBody;
+}
+// The server's own sentence for it (the numbers live on the platform), as one short plain line; a fixed one when the body has none.
+function limitLine(e) {
+  const o = limitBody(e), m = o && typeof o.message === 'string' ? collapse(o.message).replace(/[{}]/g, '').slice(0, 240) : '';
+  return m || 'Steerline: your free plan runs only so many sessions at once, so this session is not on the record; it works without it.';
+}
+// A capped session: remember the server's line for this session and say it once. Not marked unconnected: its stop sends nothing, so a marker would never be cleared.
+function markCapped(sid, e) { const line = limitLine(e); writeJson(cappedFile(sid), { line }); if (toldOnce(sid, 'capped')) process.stdout.write(line); }
+// A session the platform refused for the free plan's cap: remembered for this session alone, so none of its later events asks the platform again.
+const cappedFile = (sid) => path.join(sessionCacheDir, sidFile(sid) + '.capped');
+const cappedLine = (sid) => { const c = readJson(cappedFile(sid)); return c && typeof c.line === 'string' ? c.line : ''; };
 // The owner a 402 body names ({error:'plan_lapsed', owner:'Ana'}), as one short plain line; '' when it names none.
 function ownerOf(body) {
   try { const o = JSON.parse(body || '{}').owner; return typeof o === 'string' ? collapse(o).replace(/[^\p{L}\p{N} .'@_-]/gu, '').slice(0, 60) : ''; } catch (e) { return ''; }
@@ -888,6 +911,8 @@ function skipText(kind, line) {
 // Why a platform tool call is denied before it is made, or '' to let it through. A question is checked with a quick /health probe when nothing is known;
 // a recording tool is only skipped on what the health cache already says, so a healthy platform costs it nothing.
 async function gateReason(sid, tool, url) {
+  const capped = cappedLine(sid);
+  if (capped) { if (tool === 'ask_guidance') return questionText('capped', capped.replace(/[;,]?\s*it works without it\.$/i, '')); gap(sid); return skipText('capped', capped); }
   if (noNetwork) return tool === 'ask_guidance' ? questionText('refused', NO_TOKEN_LINE) : NO_TOKEN_LINE + ' This call is skipped; do not retry.';
   let h = knownTrouble(url);
   // No platform tool is denied on a remembered 'down' alone: one dropped connection on any route (a long poll cut by a laptop waking) writes it, so the probe
@@ -954,6 +979,8 @@ async function main() {
   const stood = await standDown(baseUrl());
   if (stood && event !== 'inject-session') return;
   if (event === 'tests') { runTests(startDir); return; }
+  // A session the platform refused for the free plan's cap works without Steerline: nothing it does later is sent (a session start asks again, a platform tool is answered by gateReason).
+  if (cappedLine(sid) && !['session-start', 'session-resume', 'inject-session', 'tool-failed'].includes(event)) return;
   const beatFile = path.join(sessionCacheDir, sidFile(sid) + '.beat');
   let beat = null; // the heartbeat to send, when one is due
   let handoffs = []; // work the batch's SendMessage calls passed to other sessions (agent-platform #45): sent at once, not with the minute's heartbeat
@@ -1030,7 +1057,7 @@ async function main() {
       // PLATFORM_TASK is set by the platform when it starts a session for a task from the page, so the two are linked.
       const task = /^\d+$/.test(process.env.PLATFORM_TASK || '') ? Number(process.env.PLATFORM_TASK) : undefined;
       await call('POST', '/api/sessions', { id: sid, project, cwd, via: 'hook', task, branch: gitBranch(cwd) });
-      unlinkQuietly(markerFile(sid));
+      unlinkQuietly(markerFile(sid)); unlinkQuietly(cappedFile(sid));
       let brief = await call('GET', '/api/projects/' + enc(project) + '/brief?session=' + enc(sid));
       if (replayed) brief = '(' + replayed + ' outcome(s) spooled by earlier sessions were sent to the platform.)\n' + brief;
       const old = outdatedLine(url, sid);
@@ -1038,8 +1065,9 @@ async function main() {
       process.stdout.write(capContext(brief));
       await reportGaps(sid, call); // a restarted session (clear, compact) with a count kept from before: the registration just succeeded
     } catch (e) {
-      mark(sid, target, cwd);
       const kind = classify(e);
+      if (kind === 'capped') { markCapped(sid, e); return; }
+      mark(sid, target, cwd);
       // A 429 here did cost something, unlike on a later call: the brief of this start. The line says so, and how to get it.
       if (kind === 'lapsed' || kind === 'refused' || kind === 'slow') { if (toldOnce(sid, kind)) process.stdout.write(lineFor(kind, e.status, ownerOf(e.body)) + (kind === 'slow' ? ' Only the brief is missing from this start: read it with the get_brief tool before you work.' : '')); return; }
       process.stdout.write('The agent platform at ' + url + ' is unreachable (' + String(e && e.message || e).slice(0, 80) + '). This session works without it: ask the user directly if you must, and put the decisions you took in your final message; the platform will receive this session\'s outcome later.');
@@ -1055,12 +1083,13 @@ async function main() {
     try {
       await replay();
       await call('POST', '/api/sessions', { id: sid, project, cwd, via: 'hook', branch: gitBranch(cwd) });
-      unlinkQuietly(markerFile(sid));
+      unlinkQuietly(markerFile(sid)); unlinkQuietly(cappedFile(sid));
       const news = (await call('GET', '/api/sessions/' + enc(sid) + '/news?channel=resume')).trim();
       const old = outdatedLine(url, sid);
       if (news || old) process.stdout.write(capContext((old ? old + '\n' : '') + (news ? 'Steerline news since this session last looked (the brief it was given at start is in its history): ' + news : '')));
       await reportGaps(sid, call);
     } catch (e) {
+      if (classify(e) === 'capped') { markCapped(sid, e); return; }
       mark(sid, target, cwd);
     }
     return;
