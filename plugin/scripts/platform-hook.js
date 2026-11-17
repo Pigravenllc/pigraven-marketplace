@@ -66,7 +66,13 @@
 // 2026-11-03.2 (plugin 0.2.15, agent-platform #45): work passed between sessions. The batch hook reports a SendMessage to another session (to, and the sender's
 //   summary, else the message's first 80 characters; never the message; 0.2.21 sends "(no summary)" instead of those 80 characters), and the prompt hook reports a prompt wrapped as <cross-session-message>
 //   (the sender's name; never its text).
-const VERSION = '2026-11-14.3';
+const VERSION = '2026-11-16.2';
+// 2026-11-16.2 (plugin 0.2.25, issues 133 and 136): a folder that resolves to no project, in a repository whose folders are attached to projects, is told which
+//   folders ("this repository's folders are attached: services/api (API), docs (Docs & Guides). Start the session inside one of them..."), from the new optional
+//   "folders" of the 404 of GET /api/resolve, instead of "is not attached". The free plan's cap line (the server's own sentence) now says how to free a slot, and a capped
+//   session id is not registered again by its own later session-start or resume for 10 minutes (the flag file's age; after that one more try).
+// 2026-11-16.1 (plugin 0.2.24, agent-platform issue 106, decision #3651): inject-session denies declare_intent, record_outcome and record_decision when the call comes from a
+//   subagent (the hook input has agent_id), with a reason that sends it to put the work in its report to its parent session. ask_guidance, reads and the main session pass.
 // 2026-11-14.3 (agent-platform decision #3596, the free plan's caps): a registration the platform refuses with 403 {"error":"free_plan_limit","message":...} (a free company
 //   already has its most sessions running) is classified 'capped'. The session works without Steerline: the server's one line is shown once, the session is
 //   remembered as capped in a flag file (<sid>.capped, this session only, never the machine's health cache), and every later event of it makes no call. A question
@@ -133,6 +139,8 @@ const PROJECT_TOOLS = new Set(['declare_intent', 'ask_guidance', 'answer_guidanc
 // Reading tools keep a project the agent named (decision #791): the brief says "read_decisions <other project>" for the rest of another
 // project's decisions, which the override made impossible; the writing tools are always the session's own project.
 const OWN_PROJECT_OPTIONAL = new Set(['read_decisions', 'get_brief']);
+// Tools a subagent never calls (decision #3651, issue 106): the parent session declares, records outcomes and records decisions.
+const SUBAGENT_DENIED = new Set(['declare_intent', 'record_outcome', 'record_decision']);
 // The platform's tool by its bare name, whether the repository's .mcp.json (mcp__platform__) or the plugin (mcp__plugin_steerline_platform__) provides it.
 function bare(tool) { const m = /^mcp__(?:plugin_steerline_)?platform__(.+)$/.exec(tool || ''); return m ? m[1] : null; }
 
@@ -227,6 +235,13 @@ function sidFile(sid) { return String(sid).replace(/[^A-Za-z0-9_-]/g, '_'); }
 function cacheFile(sid) { return path.join(sessionCacheDir, sidFile(sid) + '.json'); }
 function readCache(sid) { return readJson(cacheFile(sid)); }
 function writeCache(sid, entry) { try { mkdirp(sessionCacheDir); fs.writeFileSync(cacheFile(sid), JSON.stringify(entry)); } catch (e) { /* ignore */ } }
+// The attached folders of a remote the platform names in its 404 (issue 133): [{path, name}] or none. An old platform sends none.
+function foldersOf(body) {
+  try {
+    const f = JSON.parse(body || '{}').folders;
+    return Array.isArray(f) ? f.filter(x => x && typeof x.path === 'string' && x.path).slice(0, 12).map(x => ({ path: collapse(x.path).slice(0, 80), name: typeof x.name === 'string' ? collapse(x.name).slice(0, 60) : '' })) : [];
+  } catch (x) { return []; }
+}
 async function resolveByRemote(startDir, sid) {
   const url = baseUrl();
   const cached = readCache(sid);
@@ -247,7 +262,7 @@ async function resolveByRemote(startDir, sid) {
   } catch (e) {
     // Not attached (404) is an answer; anything else (down, a wrong or missing token, a timeout) is not, and says so (2026-10-18.3).
     const kind = classify(e);
-    if (e && e.status === 404) writeCache(sid, { unresolved: true, why: remote + ' is not attached' });
+    if (e && e.status === 404) writeCache(sid, { unresolved: true, why: remote + ' is not attached', folders: foldersOf(e.body) });
     else writeCache(sid, { unreachable: true, at: Date.now(), kind, status: (e && e.status) || 0, owner: kind === 'lapsed' ? ownerOf(e && e.body) : undefined, why: kind === 'refused' ? 'the platform at ' + url + ' refused the token' : 'the platform at ' + url + ' could not be reached' });
     return null;
   }
@@ -368,13 +383,15 @@ function limitBody(e) {
 }
 // The server's own sentence for it (the numbers live on the platform), as one short plain line; a fixed one when the body has none.
 function limitLine(e) {
-  const o = limitBody(e), m = o && typeof o.message === 'string' ? collapse(o.message).replace(/[{}]/g, '').slice(0, 240) : '';
+  const o = limitBody(e), m = o && typeof o.message === 'string' ? collapse(o.message).replace(/[{}]/g, '').slice(0, 400) : '';
   return m || 'Steerline: your free plan runs only so many sessions at once, so this session is not on the record; it works without it.';
 }
 // A capped session: remember the server's line for this session and say it once. Not marked unconnected: its stop sends nothing, so a marker would never be cleared.
 function markCapped(sid, e) { const line = limitLine(e); writeJson(cappedFile(sid), { line }); if (toldOnce(sid, 'capped')) process.stdout.write(line); }
 // A session the platform refused for the free plan's cap: remembered for this session alone, so none of its later events asks the platform again.
 const cappedFile = (sid) => path.join(sessionCacheDir, sidFile(sid) + '.capped');
+// A capped session id is not registered again by its own later session-start or resume while the flag is younger than the time a session counts as running (10 minutes).
+const cappedFresh = (sid) => { try { return !!cappedLine(sid) && Date.now() - fs.statSync(cappedFile(sid)).mtimeMs < 10 * 60 * 1000; } catch (e) { return false; } };
 const cappedLine = (sid) => { const c = readJson(cappedFile(sid)); return c && typeof c.line === 'string' ? c.line : ''; };
 // The owner a 402 body names ({error:'plan_lapsed', owner:'Ana'}), as one short plain line; '' when it names none.
 function ownerOf(body) {
@@ -912,7 +929,7 @@ function skipText(kind, line) {
 // a recording tool is only skipped on what the health cache already says, so a healthy platform costs it nothing.
 async function gateReason(sid, tool, url) {
   const capped = cappedLine(sid);
-  if (capped) { if (tool === 'ask_guidance') return questionText('capped', capped.replace(/[;,]?\s*it works without it\.$/i, '')); gap(sid); return skipText('capped', capped); }
+  if (capped) { if (tool === 'ask_guidance') return questionText('capped', capped.replace(/[;,]?\s*it works without it\..*$/i, '')); gap(sid); return skipText('capped', capped); }
   if (noNetwork) return tool === 'ask_guidance' ? questionText('refused', NO_TOKEN_LINE) : NO_TOKEN_LINE + ' This call is skipped; do not retry.';
   let h = knownTrouble(url);
   // No platform tool is denied on a remembered 'down' alone: one dropped connection on any route (a long poll cut by a laptop waking) writes it, so the probe
@@ -1014,6 +1031,13 @@ async function main() {
     const ti = input.tool_input || {};
     const extra = { session: sid };
     const tool = bare(input.tool_name);
+    // Issue 106 (decision #3651): a subagent's calls carry its parent's session, so its declare_intent, record_outcome or record_decision would speak for the
+    // parent (an early outcome closes the parent's intent). Claude Code puts agent_id in the input of a hook that fires inside a subagent; without it (the main
+    // session, or an older Claude Code) the call passes, like everything else here. agent_type alone is not enough: a --agent session has it too.
+    if (input.agent_id && SUBAGENT_DENIED.has(tool)) {
+      out({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'You are a subagent: ' + tool + ' is not yours to call, because it would be recorded for your parent session. Put it in your report to your parent session, which records it. Questions for a person still go to ask_guidance.' } });
+      return;
+    }
     const cached = !target && pluginMode ? readCache(sid) : null;
     const project = target ? target.project : cached && cached.project;
     // The session's own project, except where a reading tool names another one on purpose (decision #791).
@@ -1044,6 +1068,10 @@ async function main() {
       if (c.quiet) return; // the repository's settings do not name Steerline: the plugin is on for another reason, and says nothing here
       if (c.unreachable && c.kind && c.kind !== 'down') { if (toldOnce(sid, c.kind)) process.stdout.write(lineFor(c.kind, c.status, c.owner)); return; }
       if (c.unreachable) { process.stdout.write('Steerline: ' + why + ', so this session is not on the record; it works without it. Check the address in /plugin, Steerline, configure.'); return; }
+      if (Array.isArray(c.folders) && c.folders.length) {
+        process.stdout.write('Steerline: this repository\'s folders are attached: ' + c.folders.map(f => f.path + (f.name ? ' (' + f.name + ')' : '')).join(', ') + '. Start the session inside one of them, or run /steerline:project <id> for this session.');
+        return;
+      }
       process.stdout.write('Steerline: this folder is not attached to a project (' + why + '). Attach this repository on the Repositories page (' + baseUrl() + '/enroll) or run /steerline:project <id> for this session.');
     }
     return;
@@ -1052,6 +1080,7 @@ async function main() {
   const call = (method, p, body, timeoutMs) => callAt(url, method, p, body, timeoutMs);
 
   if (event === 'session-start') {
+    if (cappedFresh(sid)) return; // the same session id was refused for the free plan's cap a moment ago: no second POST /api/sessions (issue 136)
     try {
       const replayed = await replay();
       // PLATFORM_TASK is set by the platform when it starts a session for a task from the page, so the two are linked.
@@ -1076,6 +1105,7 @@ async function main() {
   }
 
   if (event === 'session-resume') {
+    if (cappedFresh(sid)) return;
     // A resumed or forked session already has the brief it was given, replayed from its transcript (and a changed brief would cost the prompt
     // cache), so it gets only what the platform has to tell it since its cursor: the same news a write's readback reads, on a channel of
     // its own so that it is not held to what may change a write. The session is registered again (the record is kept on a resume; a fork is
