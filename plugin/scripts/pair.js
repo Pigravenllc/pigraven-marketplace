@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Pair this machine with Steerline (agent-platform issue 78, part 2). MIT, no dependencies, node's own fetch.
-//   node pair.js <code> [--url <address>]   trade the code from the platform's /pair page for a personal token and keep it on this machine
+//   node pair.js <code> [<address>] [--url <address>]   trade the code from the platform's /pair page for a personal token and keep it on this machine
 //   node pair.js --forget [--url <address>] forget the token kept for the address
 //   node pair.js headers                    the plugin's MCP connection asks this for its headers (headersHelper in .mcp.json): prints
 //                                           {"Authorization":"Bearer <token>"} for the paired address, or {} when there is nothing to add; for an address that is
@@ -21,6 +21,9 @@ const home = process.env.USERPROFILE || process.env.HOME || os.homedir();
 const pairedFile = path.join(home, '.steerline', 'paired.json');
 const DEFAULT_URL = 'https://steerline.pigraven.com';
 const TIMEOUT_MS = 15000;
+// The address a person may type after the code (issue 150): an http(s) origin with an optional plain path, nothing a shell could split or expand. https, or http
+// for this machine, is checked again by pair() before any request.
+const ADDRESS_SHAPE = /^https?:\/\/[A-Za-z0-9.:[\]-]+(\/[A-Za-z0-9._~-]+)*\/?$/;
 const CODE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9-]{3,31}$/; // a code is eight letters and digits, shown with a hyphen; nothing a shell could split or expand, and never an option (--help)
 // A name the platform sent, as a few plain words: it is printed where the model reads it.
 function plain(s) { return typeof s === 'string' ? s.replace(/[^\p{L}\p{N} .'@_-]/gu, '').replace(/\s+/g, ' ').trim().slice(0, 60) : ''; }
@@ -89,7 +92,7 @@ function defaultUrl() {
 
 // What went wrong, in plain words and never with the code in them.
 function failure(status, base) {
-  if (status === 400) return 'That code is wrong, was used already or has expired. Get a new one at ' + base + '/pair and try again.';
+  if (status === 400) return 'Steerline at ' + base + ' did not accept that code: it is wrong, was used already or has expired. Get a new one at ' + base + '/pair and try again.';
   if (status === 429) return 'Too many tries from this address. Wait a minute, then try again with a fresh code from ' + base + '/pair.';
   if (status === 413) return 'The platform refused the request as too large.';
   if (status === 404) return 'The platform at ' + base + ' does not support pairing yet. Update the platform, or use steerline login with a token from the team page.';
@@ -98,7 +101,8 @@ function failure(status, base) {
   return 'The platform at ' + base + ' answered HTTP ' + status + ', so nothing was saved.';
 }
 
-async function pair(code, url) {
+// `own` is the address the plugin itself connects to; when the code was traded at another one, the sessions need that address set first.
+async function pair(code, url, own) {
   const key = addressKey(url);
   if (!key) return { ok: false, text: 'That is not an http or https address: ' + String(url).slice(0, 80) };
   if (!safeForToken(key)) return { ok: false, text: 'Refusing ' + key + ': over plain http the token would travel in clear text. Use https; http is only for this machine.' };
@@ -119,7 +123,10 @@ async function pair(code, url) {
   try { writeAll(all); } catch (e) { return { ok: false, text: 'Paired, but the token could not be saved on this machine (' + (e && e.code ? e.code : 'write failed') + '). Nothing was kept: revoke this machine on ' + key + '/pair, then try again with a new code.' }; }
   const who = all[key].person ? ' as ' + all[key].person : '';
   const where = all[key].company ? ' (' + all[key].company + ')' : '';
-  return { ok: true, text: 'Paired ' + key + who + where + '. Restart Claude Code so this session and its Steerline tools use the new token. The token stays on this machine; /steerline:pair --forget removes it, and you can revoke this machine on ' + key + '/pair.' + (aclFailed ? " Note: this machine would not limit the file's rights to your user alone, so it keeps the rights of your profile folder." : '') };
+  const ownKey = own ? addressKey(own) || String(own).slice(0, 80) : null;
+  return { ok: true, text: 'Paired ' + key + who + where + (ownKey && ownKey !== key
+    ? '. The plugin still connects to ' + ownKey + ', so one step is left: set the Steerline address to ' + key + ' (in Claude Code: /plugin, Steerline, configure, "Steerline address"), then restart Claude Code so this session and its Steerline tools use the new token'
+    : '. Restart Claude Code so this session and its Steerline tools use the new token') + '. The token stays on this machine; /steerline:pair --forget removes it, and you can revoke this machine on ' + key + '/pair.' + (aclFailed ? " Note: this machine would not limit the file's rights to your user alone, so it keeps the rights of your profile folder." : '') };
 }
 
 function forget(url) {
@@ -152,20 +159,26 @@ function headers() {
 async function main() {
   const args = process.argv.slice(2);
   if (args[0] === 'headers') { process.stdout.write(JSON.stringify(headers())); return 0; }
-  let url = null, code = null, forgetting = false, bad = false;
+  let url = null, code = null, typed = null, forgetting = false, bad = false;
   // Only a code, --forget and --url <address> are accepted, whatever the command line holds (a command can hand over what the person typed): anything else is
   // refused before any request and is not echoed.
+  // The command hands the person's words as one quoted argument, so a code and an address after it arrive as one word with a space: each is split out here.
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--url' && i + 1 < args.length) url = args[++i];
-    else if (args[i] === '--forget') forgetting = true;
-    else if (args[i] === '') continue; // the command's quoted, empty argument
-    else if (!code && CODE_SHAPE.test(args[i])) code = args[i];
-    else bad = true;
+    if (args[i] === '--url' && i + 1 < args.length) { url = args[++i]; continue; }
+    for (const w of args[i].split(/ +/)) {
+      if (w === '--forget') forgetting = true;
+      else if (w === '') continue; // the command's quoted, empty argument
+      else if (!code && CODE_SHAPE.test(w)) code = w;
+      else if (code && !typed && ADDRESS_SHAPE.test(w)) typed = w;
+      else bad = true;
+    }
   }
-  if (bad || (forgetting && code)) { process.stderr.write('That does not look like a pairing code: it is letters and digits with a hyphen, like WXYZ-2345. Get one on the Pair a machine page, or use --forget.\n'); return 1; }
+  if (bad || (forgetting && (code || typed))) { process.stderr.write('That does not look like a pairing code: it is letters and digits with a hyphen, like WXYZ-2345, and then at most one address. Get one on the Pair a machine page, or use --forget.\n'); return 1; }
   // The command passes the option as ${user_config.url}; an unset option can arrive as an empty string or the placeholder itself.
   if (!url || /^\$\{/.test(url)) url = defaultUrl();
-  const r = forgetting ? forget(url) : code ? await pair(code, url) : { ok: false, text: 'Usage: /steerline:pair <code> (a code from the Pair a machine page on your Steerline), or /steerline:pair --forget.' };
+  const own = url; // the address the plugin itself connects to
+  if (typed) url = typed;
+  const r = forgetting ? forget(url) : code ? await pair(code, url, own) : { ok: false, text: 'Usage: /steerline:pair <code> [<address>] (a code from the Pair a machine page on your Steerline, and the address of that Steerline when it is not the default), or /steerline:pair --forget.' };
   (r.ok ? process.stdout : process.stderr).write(r.text + '\n');
   return r.ok ? 0 : 1;
 }
