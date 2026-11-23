@@ -183,4 +183,6 @@ async function main() {
   return r.ok ? 0 : 1;
 }
 
+// The address rules, for hooks/test/address-parity.test.js, which holds the mod's copy (plugin/hooks/mod.tsx) to them.
+module.exports = { addressKey, safeForToken };
 if (require.main === module) main().then(c => { process.exitCode = c; }, () => { process.stderr.write('Pairing failed.\n'); process.exitCode = 1; });
